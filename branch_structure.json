@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/issue-1050-refactor-adopt-soroban-sdk-storage-helpers-or-a",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "fix/issue-1050-refactor-adopt-soroban-sdk-storage-helpers-or-a": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "fix/issue-1050-refactor-adopt-soroban-sdk-storage-helpers-or-a",
+    "origin"
+  ]
+}

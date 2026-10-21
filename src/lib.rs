@@ -49,6 +49,7 @@ pub mod signature;
 mod stake;
 mod storage_accounting;
 mod storage_types;
+mod store;
 mod timelock;
 mod token;
 mod transfer;
@@ -59,7 +60,7 @@ pub use errors::ContractError;
 pub use mint::{validate_period, CURRENT_PAYLOAD_VERSION, MAX_PERIOD_YEAR, MIN_PERIOD_YEAR};
 pub use oracle::DataHashOracle;
 pub use storage_types::{
-    AdminProposal, BatchWrapItem, ContractHealth, DataKey, InboundBridgeRecord, InvariantReport,
+    AdminProposal, BatchWrapItem, ContractHealth, InboundBridgeRecord, InvariantReport,
     OutboundBridgeRequest, ProposalStatus, StakeConfig, StakeRecord, TimelockAction,
     TimelockOperation, TransferFeeConfig, WrapLifecycleFSM, WrapRecord, WrapState, WrapSummary,
 };

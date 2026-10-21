@@ -1,7 +1,7 @@
-#[cfg(any(test, feature = "testutils"))]
+#`[cfg(any(test, feature = "testutils"))]
 extern crate std;
 
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
+use soroban_sdk:{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -94,7 +94,7 @@ pub struct BatchWrapItem {
     pub user: Address,
     pub period: u64,
     pub archetype: Symbol,
-    pub data_hash: BytesN<32>,
+    pub data_hash: BytesN32>,
     pub payload_version: u32,
     pub valid_until: u64,
     pub signature: BytesN<64>,
@@ -136,11 +136,11 @@ pub enum TimelockAction {
     /// Replace the admin address.
     SetAdmin(Address),
     /// Rotate the Ed25519 signing key used to validate mint payloads.
-    SetAdminPubKey(BytesN<32>),
+    SetAdminPubKey(BytesN32>),
     /// Upgrade the contract WASM to the given hash.
-    Upgrade(BytesN<32>),
+    Upgrade(BytesN32>),
     /// Publish a new off-chain whitelist merkle root.
-    SetWhitelistRoot(BytesN<32>),
+    SetWhitelistRoot(BytesN32>),
     /// Change the timelock delay itself (seconds).
     SetTimelockDelay(u64),
     /// Configure the bridge relayer set and threshold for a given chain.
@@ -168,7 +168,7 @@ pub struct OutboundBridgeRequest {
     pub recipient_address: Bytes,
     pub period: u64,
     pub archetype: Symbol,
-    pub data_hash: BytesN<32>,
+    pub data_hash: BytesN32>,
     pub timestamp: u64,
 }
 
@@ -180,14 +180,14 @@ pub struct InboundBridgeRecord {
     pub recipient: Address,
     pub period: u64,
     pub archetype: Symbol,
-    pub data_hash: BytesN<32>,
+    pub data_hash: BytesN32>,
     pub timestamp: u64,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BridgeRelayerSet {
-    pub relayers: Vec<BytesN<32>>,
+    pub relayers: Vec<BytesN32>>,
     pub threshold: u32,
 }
 
@@ -202,8 +202,14 @@ pub struct TransferFeeConfig {
     pub token: Address,
 }
 
+/// Storage key enum for the contract.
+///
+/// This enum is intentionally `pub` because the `store/` module needs to refer to
+/// its variants. Modules outside of `store/` must not call `storage()` directly;
+/// they go through the typed store accessors instead (see the acceptance criteria
+/// in the storage-wrapper refactor).
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     /// Stores the address of the admin.
     Admin,
@@ -237,7 +243,7 @@ pub enum DataKey {
     /// Stores a user-controlled 32-byte alias hash for privacy-preserving profile display.
     AliasHash(Address),
     /// Stores the 32-byte hash that owns a given alias.
-    AliasOwner(BytesN<32>),
+    AliasOwner(BytesN32>),
     /// Stores the token display name, if overridden by an admin.
     /// Falls back to a hardcoded default when unset — see `queries::name`.
     Name,
@@ -269,7 +275,7 @@ pub enum DataKey {
     /// privileged action once the timelock is enabled (instance-level).
     TimelockDelay,
     /// A scheduled privileged action, keyed by its deterministic operation id.
-    TimelockOp(BytesN<32>),
+    TimelockOp(BytesN32>),
     /// Ids of every currently scheduled timelock operation (persistent, capped
     /// at `timelock::MAX_PENDING_OPERATIONS`). Stored in persistent storage so
     /// that reading it does not inflate the instance footprint on every
@@ -341,47 +347,17 @@ pub struct StakeConfig {
     /// Seconds that must elapse between `unstake` and `withdraw_stake`.
     pub cooldown_seconds: u64,
     /// Basis points of discount earned per multiple of `min_stake`.
-    pub priority_multiplier_bps: u32,
-    /// Maximum discount (in basis points) a user can reach.
-    pub max_priority_bps: u32,
+    pub discount_bps: u32,
 }
 
-/// A user's staking record.
+/// Individual user stake record.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StakeRecord {
-    /// Total amount currently staked.
+    /// Amount currently staked by the user.
     pub amount: i128,
-    /// Ledger timestamp of the initial stake.
+    /// Ledger timestamp at which the user last started staking.
     pub staked_at: u64,
-    /// Ledger timestamp when `unstake` was called, or 0 if not unstaking.
-    pub unstaking_at: u64,
-}
-
-/// A report on the consistency of a user's storage state.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvariantReport {
-    pub wrap_count_match_user_periods: bool,
-    pub wrap_count_match_wrap_periods: bool,
-    pub latest_period_matches_max: bool,
-    pub all_user_periods_live: bool,
-    pub balance_matches_wrap_count: bool,
-    pub wrap_count: u32,
-    pub user_periods_len: u32,
-    pub wrap_periods_len: u32,
-    pub latest_period: Option<u64>,
-    pub max_user_period: Option<u64>,
-    pub live_wraps_found: u32,
-    pub balance: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WrapSummary {
-    pub total_wraps: u32,
-    pub periods: Vec<u64>,
-    pub archetypes: Vec<Symbol>,
-    pub first_period: u64,
-    pub latest_period: u64,
+    /// Ledger timestamp at which the user requested unstaking (0 if not unstaking).
+    pub unstake_requested_at: u64,
 }

@@ -6,8 +6,9 @@ use crate::{
     signature::verify_mint_signature,
     storage_accounting,
     storage_types::{WrapLifecycleFSM, WrapState},
+    store::{ExpirationStore, LatestPeriodStore, LastUpdatedStore, WrapCountStore, WrapPeriodsStore, WrapStore, UserPeriodsStore, TotalWrapCountStore, AdminPubKeyStore},
     ttl::TTL_ONE_YEAR,
-    ContractError, DataKey, WrapRecord,
+    ContractError, WrapRecord,
 };
 
 pub const CURRENT_PAYLOAD_VERSION: u32 = 2;
@@ -32,10 +33,7 @@ fn validate_payload_version(e: &Env, version: u32) {
 }
 
 fn get_admin_pubkey(e: &Env) -> BytesN<32> {
-    e.storage()
-        .instance()
-        .get(&DataKey::AdminPubKey)
-        .unwrap_or_else(|| panic_with_error!(e, ContractError::NotInitialized))
+    AdminPubKeyStore::get(e).unwrap_or_else(|| panic_with_error!(e, ContractError::NotInitialized))
 }
 
 /// Records the ledger timestamp at which the user's registry state last
@@ -45,12 +43,8 @@ fn get_admin_pubkey(e: &Env) -> BytesN<32> {
 /// only overwrite the existing value and renew its TTL.
 pub(crate) fn update_last_updated(e: &Env, user: &Address) {
     let now = e.ledger().timestamp();
-    let key = DataKey::LastUpdated(user.clone());
-    let was_missing = !e.storage().persistent().has(&key);
-    e.storage().persistent().set(&key, &now);
-    e.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_ONE_YEAR, TTL_ONE_YEAR);
+    let was_missing = !LastUpdatedStore::has(e, user);
+    LastUpdatedStore::set(e, user, &now);
     if was_missing {
         storage_accounting::add_storage_bytes(
             e,
@@ -64,18 +58,14 @@ pub(crate) fn update_last_updated(e: &Env, user: &Address) {
 /// Storage bytes are accounted once, when the entry is first created; subsequent updates
 /// only overwrite the existing value if `period` is higher and renew its TTL.
 pub(crate) fn update_latest_period(e: &Env, user: &Address, period: u64) {
-    let latest_key = DataKey::LatestPeriod(user.clone());
-    let current_latest: Option<u64> = e.storage().persistent().get(&latest_key);
+    let current_latest: Option<u64> = LatestPeriodStore::get(e, user);
     let should_update = match current_latest {
         Some(cur) => period > cur,
         None => true,
     };
     if should_update {
         let was_missing = current_latest.is_none();
-        e.storage().persistent().set(&latest_key, &period);
-        e.storage()
-            .persistent()
-            .extend_ttl(&latest_key, TTL_ONE_YEAR, TTL_ONE_YEAR);
+        LatestPeriodStore::set(e, user, &period);
         if was_missing {
             storage_accounting::add_storage_bytes(
                 e,
@@ -111,39 +101,27 @@ pub(crate) fn update_latest_period(e: &Env, user: &Address, period: u64) {
 pub(crate) fn insert_wrap_record(e: &Env, user: &Address, period: u64, record: &WrapRecord) {
     optout::require_not_opted_out(e, user);
 
-    let wrap_key = DataKey::Wrap(user.clone(), period);
-    if e.storage().persistent().has(&wrap_key) {
+    if WrapStore::has(e, user, period) {
         panic_with_error!(e, ContractError::WrapAlreadyExists);
     }
 
-    e.storage().persistent().set(&wrap_key, record);
-    e.storage()
-        .persistent()
-        .extend_ttl(&wrap_key, TTL_ONE_YEAR, TTL_ONE_YEAR);
+    WrapStore::set(e, user, period, record);
 
     // Account for estimated storage bytes for new wrap record
     storage_accounting::add_storage_bytes(e, storage_accounting::estimate_wrap_bytes_new());
 
     // Update wrap count and account for count entry if first insert
-    let count_key = DataKey::WrapCount(user.clone());
-    let current_count: u32 = e.storage().persistent().get(&count_key).unwrap_or(0);
+    let current_count: u32 = WrapCountStore::get(e, user).unwrap_or(0);
     let next_count = current_count
         .checked_add(1)
         .unwrap_or_else(|| panic_with_error!(e, ContractError::ArithmeticOverflow));
-    e.storage().persistent().set(&count_key, &next_count);
-    e.storage()
-        .persistent()
-        .extend_ttl(&count_key, TTL_ONE_YEAR, TTL_ONE_YEAR);
+    WrapCountStore::set(e, user, &next_count);
 
-    let total_key = DataKey::TotalWrapCount;
-    let current_total: u32 = e.storage().persistent().get(&total_key).unwrap_or(0);
+    let current_total: u32 = TotalWrapCountStore::get(e).unwrap_or(0);
     let next_total = current_total
         .checked_add(1)
         .unwrap_or_else(|| panic_with_error!(e, ContractError::ArithmeticOverflow));
-    e.storage().persistent().set(&total_key, &next_total);
-    e.storage()
-        .persistent()
-        .extend_ttl(&total_key, TTL_ONE_YEAR, TTL_ONE_YEAR);
+    TotalWrapCountStore::set(e, &next_total);
 
     if current_count == 0 {
         storage_accounting::add_storage_bytes(
@@ -155,19 +133,12 @@ pub(crate) fn insert_wrap_record(e: &Env, user: &Address, period: u64, record: &
     update_latest_period(e, user, period);
 
     // UserPeriods: if we push a new period value, account for it
-    let user_periods_key = DataKey::UserPeriods(user.clone());
-    let mut periods: soroban_sdk::Vec<u64> = e
-        .storage()
-        .persistent()
-        .get(&user_periods_key)
-        .unwrap_or(soroban_sdk::Vec::new(e));
+    let mut periods: soroban_sdk::Vec<u64> =
+        UserPeriodsStore::get(e, user).unwrap_or(soroban_sdk::Vec::new(e));
 
     if !periods.contains(period) {
         periods.push_back(period);
-        e.storage().persistent().set(&user_periods_key, &periods);
-        e.storage()
-            .persistent()
-            .extend_ttl(&user_periods_key, TTL_ONE_YEAR, TTL_ONE_YEAR);
+        UserPeriodsStore::set(e, user, &periods);
 
         storage_accounting::add_storage_bytes(
             e,
@@ -178,23 +149,14 @@ pub(crate) fn insert_wrap_record(e: &Env, user: &Address, period: u64, record: &
     // WrapPeriods: transfer-index maintained alongside UserPeriods. A user that
     // already has wraps but is missing this index is a legacy user that must be
     // backfilled via `backfill_wrap_periods` before further mints are allowed.
-    let wrap_periods_key = DataKey::WrapPeriods(user.clone());
-    if !e.storage().persistent().has(&wrap_periods_key) && current_count > 0 {
+    if !WrapPeriodsStore::has(e, user) && current_count > 0 {
         panic_with_error!(e, ContractError::StorageInvariantViolation);
     }
-    let mut wrap_periods: soroban_sdk::Vec<u64> = e
-        .storage()
-        .persistent()
-        .get(&wrap_periods_key)
-        .unwrap_or(soroban_sdk::Vec::new(e));
+    let mut wrap_periods: soroban_sdk::Vec<u64> =
+        WrapPeriodsStore::get(e, user).unwrap_or(soroban_sdk::Vec::new(e));
     if !wrap_periods.contains(period) {
         wrap_periods.push_back(period);
-        e.storage()
-            .persistent()
-            .set(&wrap_periods_key, &wrap_periods);
-        e.storage()
-            .persistent()
-            .extend_ttl(&wrap_periods_key, TTL_ONE_YEAR, TTL_ONE_YEAR);
+        WrapPeriodsStore::set(e, user, &wrap_periods);
     }
 
     update_last_updated(e, user);
@@ -373,11 +335,7 @@ pub(crate) fn transition_wrap_state(e: Env, user: Address, period: u64, next_sta
     crate::admin::require_not_paused(&e);
     user.require_auth();
 
-    let wrap_key = DataKey::Wrap(user.clone(), period);
-    let mut record: WrapRecord = e
-        .storage()
-        .persistent()
-        .get(&wrap_key)
+    let mut record: WrapRecord = WrapStore::get(&e, &user, period)
         .unwrap_or_else(|| panic_with_error!(e, ContractError::WrapNotFound));
 
     if record.lifecycle.state == WrapState::Bridged {
@@ -389,10 +347,7 @@ pub(crate) fn transition_wrap_state(e: Env, user: Address, period: u64, next_sta
         panic_with_error!(e, ContractError::InvalidStateTransition);
     }
 
-    e.storage().persistent().set(&wrap_key, &record);
-    e.storage()
-        .persistent()
-        .extend_ttl(&wrap_key, TTL_ONE_YEAR, TTL_ONE_YEAR);
+    WrapStore::set(&e, &user, period, &record);
 
     crate::events::publish_event(
         &e,
@@ -405,10 +360,7 @@ pub(crate) fn transition_wrap_state(e: Env, user: Address, period: u64, next_sta
 /// Returns the configured expiration duration for unverified wraps.
 /// Defaults to 7 days (604,800 seconds) if not set by admin.
 pub(crate) fn get_expiration_duration(e: &Env) -> u64 {
-    e.storage()
-        .instance()
-        .get(&DataKey::ExpirationDuration)
-        .unwrap_or(DEFAULT_EXPIRATION_SECONDS)
+    ExpirationStore::get(e).unwrap_or(DEFAULT_EXPIRATION_SECONDS)
 }
 
 /// Admin-only: sets the expiration duration (in seconds) for unverified wraps.
@@ -419,9 +371,7 @@ pub(crate) fn set_expiration_duration(e: &Env, duration: u64) {
     if duration == 0 {
         panic_with_error!(e, ContractError::InvalidExpirationDuration);
     }
-    e.storage()
-        .instance()
-        .set(&DataKey::ExpirationDuration, &duration);
+    ExpirationStore::set(e, &duration);
 }
 
 /// Expires a wrap if its expiration deadline has passed.
@@ -439,11 +389,7 @@ pub(crate) fn set_expiration_duration(e: &Env, duration: u64) {
 pub(crate) fn expire_wrap(e: Env, user: Address, period: u64) {
     crate::admin::require_not_paused(&e);
 
-    let wrap_key = DataKey::Wrap(user.clone(), period);
-    let mut record: WrapRecord = e
-        .storage()
-        .persistent()
-        .get(&wrap_key)
+    let mut record: WrapRecord = WrapStore::get(&e, &user, period)
         .unwrap_or_else(|| panic_with_error!(e, ContractError::WrapNotFound));
 
     let now = e.ledger().timestamp();
@@ -458,10 +404,7 @@ pub(crate) fn expire_wrap(e: Env, user: Address, period: u64) {
         panic_with_error!(e, ContractError::InvalidStateTransition);
     }
 
-    e.storage().persistent().set(&wrap_key, &record);
-    e.storage()
-        .persistent()
-        .extend_ttl(&wrap_key, TTL_ONE_YEAR, TTL_ONE_YEAR);
+    WrapStore::set(&e, &user, period, &record);
 
     e.events().publish(
         (symbol_short!("expire"), user, period),

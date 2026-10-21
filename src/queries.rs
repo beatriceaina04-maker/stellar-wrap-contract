@@ -12,14 +12,15 @@
 
 use soroban_sdk::{Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
-use crate::{ContractHealth, DataKey, InvariantReport, TransferFeeConfig, WrapRecord, WrapSummary};
+use crate::store::{self, WrapStore};
+use crate::{ContractHealth, InvariantReport, TransferFeeConfig, WrapRecord, WrapSummary};
 
 pub(crate) fn get_wrap(e: Env, user: Address, period: u64) -> Option<WrapRecord> {
-    e.storage().persistent().get(&DataKey::Wrap(user, period))
+    WrapStore::get(&e, &user, period)
 }
 
 pub(crate) fn get_mint_timestamp(e: Env, user: Address, period: u64) -> Option<u64> {
-    let wrap: Option<WrapRecord> = e.storage().persistent().get(&DataKey::Wrap(user, period));
+    let wrap: Option<WrapRecord> = WrapStore::get(&e, &user, period);
     wrap.map(|r| r.timestamp)
 }
 
@@ -27,7 +28,7 @@ pub(crate) fn get_mint_timestamp(e: Env, user: Address, period: u64) -> Option<u
 /// successful mint or revoke, or `None` if the user has never minted or had a
 /// wrap revoked.
 pub(crate) fn get_last_updated(e: Env, user: Address) -> Option<u64> {
-    e.storage().persistent().get(&DataKey::LastUpdated(user))
+    store::LastUpdatedStore::get(&e, &user)
 }
 
 /// Returns the number of active wrap records for the user.
@@ -36,17 +37,11 @@ pub(crate) fn get_last_updated(e: Env, user: Address) -> Option<u64> {
 /// and casts it to `i128` to satisfy the standard token interface return signature.
 /// The return value represents a count of discrete wrap records, not a fungible token balance.
 pub(crate) fn balance_of(e: Env, user: Address) -> i128 {
-    e.storage()
-        .persistent()
-        .get::<_, u32>(&DataKey::WrapCount(user))
-        .unwrap_or(0) as i128
+    store::WrapCountStore::get(&e, &user) as i128
 }
 
 pub(crate) fn total_wrap_count(e: Env) -> u32 {
-    e.storage()
-        .persistent()
-        .get(&DataKey::TotalWrapCount)
-        .unwrap_or(0)
+    store::TotalWrapCountStore::get(&e)
 }
 
 /// Verifies that `data` matches the SHA-256 hash committed for `(user, period)`.
@@ -58,7 +53,7 @@ pub(crate) fn total_wrap_count(e: Env) -> u32 {
 ///
 /// This function is pure read — it never writes storage and requires no auth.
 pub(crate) fn verify_data(e: Env, user: Address, period: u64, data: Bytes) -> bool {
-    let wrap: Option<WrapRecord> = e.storage().persistent().get(&DataKey::Wrap(user, period));
+    let wrap: Option<WrapRecord> = WrapStore::get(&e, &user, period);
     wrap.is_some_and(|record| {
         let computed_hash = e.crypto().sha256(&data);
         let computed_hash = BytesN::from_array(&e, &computed_hash.to_array());
@@ -67,13 +62,8 @@ pub(crate) fn verify_data(e: Env, user: Address, period: u64, data: Bytes) -> bo
 }
 
 pub(crate) fn get_latest_wrap(e: Env, user: Address) -> Option<WrapRecord> {
-    let latest_key = DataKey::LatestPeriod(user.clone());
-    if let Some(period) = e.storage().persistent().get::<_, u64>(&latest_key) {
-        if let Some(wrap) = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Wrap(user.clone(), period))
-        {
+    if let Some(period) = store::LatestPeriodStore::get(&e, &user) {
+        if let Some(wrap) = WrapStore::get(&e, &user, period) {
             return Some(wrap);
         }
     }
@@ -83,19 +73,12 @@ pub(crate) fn get_latest_wrap(e: Env, user: Address) -> Option<WrapRecord> {
     // due to corruption or migration issues. Under normal operation, LatestPeriod
     // should always be recomputed correctly during revoke/burn, so this fallback
     // should not be triggered.
-    let periods: soroban_sdk::Vec<u64> = e
-        .storage()
-        .persistent()
-        .get(&DataKey::UserPeriods(user.clone()))?;
+    let periods: soroban_sdk::Vec<u64> = store::UserPeriodsStore::get(&e, &user)?;
     let mut latest: Option<WrapRecord> = None;
 
     for index in 0..periods.len() {
         if let Some(period) = periods.get(index) {
-            if let Some(wrap) = e
-                .storage()
-                .persistent()
-                .get::<_, WrapRecord>(&DataKey::Wrap(user.clone(), period))
-            {
+            if let Some(wrap) = WrapStore::get(&e, &user, period) {
                 let is_newer = match latest.as_ref() {
                     None => true,
                     Some(current) => wrap.period > current.period,
@@ -117,23 +100,14 @@ pub(crate) fn get_wraps(
     limit: u32,
 ) -> soroban_sdk::Vec<WrapRecord> {
     let mut results = soroban_sdk::Vec::new(&e);
-    let user_periods_key = DataKey::UserPeriods(user.clone());
 
-    if let Some(periods) = e
-        .storage()
-        .persistent()
-        .get::<_, soroban_sdk::Vec<u64>>(&user_periods_key)
-    {
+    if let Some(periods) = store::UserPeriodsStore::get(&e, &user) {
         let len = periods.len();
         if start < len {
             let end = core::cmp::min(start.saturating_add(limit), len);
             for i in start..end {
                 if let Some(period) = periods.get(i) {
-                    if let Some(wrap) = e
-                        .storage()
-                        .persistent()
-                        .get(&DataKey::Wrap(user.clone(), period))
-                    {
+                    if let Some(wrap) = WrapStore::get(&e, &user, period) {
                         results.push_back(wrap);
                     }
                 }
@@ -169,11 +143,7 @@ pub(crate) fn get_all_wraps_for_user(e: Env, user: Address) -> soroban_sdk::Vec<
 /// - `first_period`: the earliest period with an active wrap
 /// - `latest_period`: the latest period with an active wrap
 pub(crate) fn get_wrap_summary(e: Env, user: Address) -> Option<WrapSummary> {
-    let wrap_periods_key = DataKey::WrapPeriods(user.clone());
-    let periods: soroban_sdk::Vec<u64> = e
-        .storage()
-        .persistent()
-        .get(&wrap_periods_key)?;
+    let periods: soroban_sdk::Vec<u64> = store::WrapPeriodsStore::get(&e, &user)?;
 
     if periods.is_empty() {
         return None;
@@ -186,11 +156,7 @@ pub(crate) fn get_wrap_summary(e: Env, user: Address) -> Option<WrapSummary> {
 
     for i in 0..periods.len() {
         if let Some(period) = periods.get(i) {
-            if let Some(wrap) = e
-                .storage()
-                .persistent()
-                .get::<_, WrapRecord>(&DataKey::Wrap(user.clone(), period))
-            {
+            if let Some(wrap) = WrapStore::get(&e, &user, period) {
                 total_wraps += 1;
 
                 if period < first_period {
@@ -222,12 +188,12 @@ pub(crate) fn get_wrap_summary(e: Env, user: Address) -> Option<WrapSummary> {
 
 /// Return the configured transfer-fee configuration, or `None` if unset.
 pub(crate) fn get_transfer_fee(e: Env) -> Option<TransferFeeConfig> {
-    e.storage().instance().get(&DataKey::TransferFee)
+    store::TransferFeeStore::get(&e)
 }
 
 pub(crate) fn health(e: Env) -> ContractHealth {
-    let has_admin = e.storage().instance().has(&DataKey::Admin);
-    let has_signing_key = e.storage().instance().has(&DataKey::AdminPubKey);
+    let has_admin = store::AdminStore::has(&e);
+    let has_signing_key = store::AdminPubKeyStore::has(&e);
 
     ContractHealth {
         initialized: has_admin,
@@ -237,7 +203,7 @@ pub(crate) fn health(e: Env) -> ContractHealth {
 }
 
 pub(crate) fn get_admin(e: Env) -> Option<Address> {
-    e.storage().instance().get(&DataKey::Admin)
+    store::AdminStore::get(&e)
 }
 
 /// Return the configured Ed25519 admin public key, or `None` before `initialize`.
@@ -247,7 +213,7 @@ pub(crate) fn get_admin(e: Env) -> Option<Address> {
 /// it does not reveal private key material. Prefer this over reading storage
 /// directly when building ops/monitoring tooling.
 pub(crate) fn get_admin_pubkey(e: Env) -> Option<BytesN<32>> {
-    e.storage().instance().get(&DataKey::AdminPubKey)
+    store::AdminPubKeyStore::get(&e)
 }
 
 /// Return the contract semantic version string (`MAJOR.MINOR.PATCH`).
@@ -266,28 +232,19 @@ pub(crate) fn version(e: Env) -> String {
 /// Use `get_wrap` when the full record (timestamp, archetype, hash, FSM) is
 /// required.
 pub(crate) fn has_wrap(e: Env, user: Address, period: u64) -> bool {
-    e.storage().persistent().has(&DataKey::Wrap(user, period))
+    WrapStore::has(&e, &user, period)
 }
 
 pub(crate) fn total_revoked(e: Env) -> u64 {
-    e.storage()
-        .instance()
-        .get::<_, u64>(&DataKey::TotalRevoked)
-        .unwrap_or(0)
+    store::TotalRevokedStore::get(&e)
 }
 
 pub(crate) fn name(e: Env) -> String {
-    e.storage()
-        .instance()
-        .get(&DataKey::Name)
-        .unwrap_or_else(|| String::from_str(&e, "Stellar Wrap Registry"))
+    store::NameStore::get(&e).unwrap_or_else(|| String::from_str(&e, "Stellar Wrap Registry"))
 }
 
 pub(crate) fn symbol(e: Env) -> String {
-    e.storage()
-        .instance()
-        .get(&DataKey::Symbol)
-        .unwrap_or_else(|| String::from_str(&e, "WRAP"))
+    store::SymbolStore::get(&e).unwrap_or_else(|| String::from_str(&e, "WRAP"))
 }
 
 /// Returns `0` because wrap records represent discrete, indivisible registry entries with
@@ -297,10 +254,7 @@ pub(crate) fn decimals(_e: Env) -> u32 {
 }
 
 pub(crate) fn contract_version(e: Env) -> u32 {
-    e.storage()
-        .instance()
-        .get(&DataKey::ContractVersion)
-        .unwrap_or(0)
+    store::ContractVersionStore::get(&e)
 }
 
 /// Returns the storage schema version.
@@ -310,39 +264,23 @@ pub(crate) fn contract_version(e: Env) -> u32 {
 /// Future upgrades that change the storage layout should increment this version
 /// as part of their migration logic (see `admin::migrate`).
 pub(crate) fn schema_version(e: Env) -> u32 {
-    e.storage()
-        .instance()
-        .get(&DataKey::SchemaVersion)
-        .unwrap_or(0)
+    store::SchemaVersionStore::get(&e)
 }
 
 pub const MAX_QUERY_RESULTS: u32 = 100;
 
 pub(crate) fn check_user_invariants(e: Env, user: Address) -> InvariantReport {
-    let wrap_count: u32 = e
-        .storage()
-        .persistent()
-        .get(&DataKey::WrapCount(user.clone()))
-        .unwrap_or(0);
+    let wrap_count: u32 = store::WrapCountStore::get(&e, &user);
 
-    let user_periods: soroban_sdk::Vec<u64> = e
-        .storage()
-        .persistent()
-        .get(&DataKey::UserPeriods(user.clone()))
-        .unwrap_or_else(|| soroban_sdk::Vec::new(&e));
+    let user_periods: soroban_sdk::Vec<u64> =
+        store::UserPeriodsStore::get(&e, &user).unwrap_or_else(|| soroban_sdk::Vec::new(&e));
     let user_periods_len = user_periods.len();
 
-    let wrap_periods: soroban_sdk::Vec<u64> = e
-        .storage()
-        .persistent()
-        .get(&DataKey::WrapPeriods(user.clone()))
-        .unwrap_or_else(|| soroban_sdk::Vec::new(&e));
+    let wrap_periods: soroban_sdk::Vec<u64> =
+        store::WrapPeriodsStore::get(&e, &user).unwrap_or_else(|| soroban_sdk::Vec::new(&e));
     let wrap_periods_len = wrap_periods.len();
 
-    let latest_period: Option<u64> = e
-        .storage()
-        .persistent()
-        .get(&DataKey::LatestPeriod(user.clone()));
+    let latest_period: Option<u64> = store::LatestPeriodStore::get(&e, &user);
 
     let mut max_user_period: Option<u64> = None;
     let mut live_wraps_found = 0;
@@ -351,7 +289,7 @@ pub(crate) fn check_user_invariants(e: Env, user: Address) -> InvariantReport {
     for i in 0..scan_len {
         if let Some(p) = user_periods.get(i) {
             max_user_period = Some(core::cmp::max(max_user_period.unwrap_or(0), p));
-            if e.storage().persistent().has(&DataKey::Wrap(user.clone(), p)) {
+            if WrapStore::has(&e, &user, p) {
                 live_wraps_found += 1;
             }
         }
